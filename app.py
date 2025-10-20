@@ -9,7 +9,7 @@ app = Flask(__name__, static_folder="static", template_folder="templates")
 IA_HISTORY = []  # histórico IA para gráfico
 
 # =====================================================
-# 🔹 Função segura e compatível com o Vercel
+# 🔹 Função segura para obter dados do Yahoo Finance
 # =====================================================
 def safe_download(tickers):
     for t in tickers:
@@ -17,41 +17,40 @@ def safe_download(tickers):
             print(f"🔹 A tentar {t}")
             df = yf.download(
                 t,
-                period="3mo",
+                period="6mo",
                 interval="1d",
                 progress=False,
                 auto_adjust=False,
-                threads=False,
-                timeout=5  # ⏱️ evita crash no Vercel
+                threads=False
             )
 
+            # 🔧 Corrige colunas multi-nível
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
+
             df = df.dropna(subset=["Close"])
 
             if df.empty:
                 continue
 
+            # 🔹 Garante tipo float
             df["Close"] = df["Close"].astype(float)
+
             print(f"✅ OK {t} ({len(df)} registos)")
             return df
 
         except Exception as e:
             print(f"⚠️ Falha {t}: {e}")
 
-    # 💾 fallback: dados simulados (modo offline)
-    print("⚙️ Modo offline (simulação de dados)")
-    dates = pd.date_range(end=datetime.now(), periods=30)
-    df = pd.DataFrame({
-        "Close": np.linspace(100, 110, len(dates)) + np.random.randn(len(dates))
-    }, index=dates)
-    return df
+    print("❌ Nenhum dado válido.")
+    return pd.DataFrame()
 
 # =====================================================
 # 📊 Indicadores técnicos
 # =====================================================
 def compute_indicators(df):
     df = df.copy()
+
     df["EMA5"] = df["Close"].ewm(span=5).mean()
     df["EMA20"] = df["Close"].ewm(span=20).mean()
     df["Mom5"] = df["Close"].diff(5)
@@ -64,11 +63,12 @@ def compute_indicators(df):
     avg_loss = loss.rolling(14).mean()
     rs = avg_gain / avg_loss
     df["RSI"] = 100 - (100 / (1 + rs))
+
     df = df.replace([np.inf, -np.inf], np.nan).dropna()
     return df
 
 # =====================================================
-# 🤖 IA simples
+# 🤖 IA simples com base em heurísticas
 # =====================================================
 def ai_predict(df):
     if len(df) < 2:
@@ -105,6 +105,7 @@ def ai_predict(df):
         "#ff5555" if decision == "DESCER" else
         "#ffff66"
     )
+
     comment = (
         "📈 Tendência de alta" if decision == "SUBIR" else
         "📉 Tendência de baixa" if decision == "DESCER" else
@@ -150,23 +151,45 @@ def snapshot():
     for name, tickers in markets.items():
         print(f"\n🔎 A obter {tickers} …")
         df = safe_download(tickers)
+
+        if df.empty:
+            results[name] = {"error": "Sem dados"}
+            continue
+
         df = compute_indicators(df)
 
-        ai = ai_predict(df)
-        results[name] = ai
-        if "error" not in ai:
-            probs.append(ai["prob"])
-            confs.append(ai["conf"])
+        if df.empty:
+            results[name] = {"error": "Sem indicadores"}
+            continue
 
-    avg_prob = np.mean(probs) if probs else 0
-    avg_conf = np.mean(confs) if confs else 0
+        ai = ai_predict(df)
+        if "error" in ai:
+            results[name] = ai
+            continue
+
+        results[name] = ai
+        probs.append(ai["prob"])
+        confs.append(ai["conf"])
+
+    if probs:
+        avg_prob = np.mean(probs)
+        avg_conf = np.mean(confs)
+    else:
+        avg_prob = 0
+        avg_conf = 0
+
     trend = (
-        "🟢 Tendência geral: otimista" if avg_prob > 55 else
-        "🔴 Tendência geral: negativa" if avg_prob < 45 else
+        "🟢 Tendência geral: otimista"
+        if avg_prob > 55 else
+        "🔴 Tendência geral: negativa"
+        if avg_prob < 45 else
         "⚪ Tendência geral: neutra"
     )
 
-    IA_HISTORY.append({"time": datetime.now().strftime("%H:%M"), "prob": round(avg_prob, 2)})
+    IA_HISTORY.append({
+        "time": datetime.now().strftime("%H:%M"),
+        "prob": round(avg_prob, 2)
+    })
     if len(IA_HISTORY) > 30:
         IA_HISTORY.pop(0)
 
@@ -178,8 +201,6 @@ def snapshot():
     }
 
     return jsonify(results)
-
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
 
